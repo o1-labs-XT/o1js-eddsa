@@ -16,6 +16,7 @@ import {
   affineTwistedDouble,
   affineTwistedZero,
   TwistedCurveParams,
+  createAffineTwistedCurve,
 } from './crypto/elliptic-curve.js';
 
 export {

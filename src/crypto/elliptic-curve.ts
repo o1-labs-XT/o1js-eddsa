@@ -6,6 +6,7 @@ export {
   affineTwistedAdd,
   affineTwistedDouble,
   affineTwistedZero,
+  createAffineTwistedCurve,
   TwistedCurveParams,
 };
 
