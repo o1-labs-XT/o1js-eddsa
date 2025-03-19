@@ -1,4 +1,19 @@
-import { Provable, assert, Gadgets, provable, Bindings, Field } from 'o1js';
+import {
+  Provable,
+  assert,
+  Gadgets,
+  provable,
+  Bindings,
+  Field,
+  Octets,
+  UInt8,
+  Bool,
+  AlmostForeignField,
+  Bytes,
+  ProvablePureExtended,
+  createForeignField,
+  provableFromClass,
+} from 'o1js';
 
 import {
   AffineTwistedCurve,
@@ -6,14 +21,37 @@ import {
   affineTwistedAdd,
   affineTwistedDouble,
   affineTwistedZero,
+  createAffineTwistedCurve,
 } from '../crypto/elliptic-curve.js';
+import { TwistedCurveParams, TwistedCurves } from '../index.js';
 
-export { TwistedCurve, Point, simpleMapToCurve, Field3 };
+export {
+  TwistedCurve,
+  Point,
+  simpleMapToCurve,
+  Field3,
+  scale,
+  Eddsa,
+  toPoint,
+  FlexiblePoint,
+  encode,
+  ForeignTwisted,
+  createForeignTwisted,
+  TwistedCurves,
+};
 
 const { assertPositiveInteger } = Bindings.NonNegativeInteger;
 
-const { sliceField3, Field3, arrayGetGeneric, ForeignField } = Gadgets;
+const {
+  sliceField3,
+  Field3,
+  arrayGetGeneric,
+  ForeignField,
+  SHA2,
+  multiRangeCheck,
+} = Gadgets;
 const { l2Mask } = Gadgets.Constants;
+const { mod } = Bindings.FiniteField;
 
 const TwistedCurve = {
   add,
@@ -26,6 +64,15 @@ const TwistedCurve = {
 };
 
 type Field3 = [Field, Field, Field];
+
+type FlexiblePoint = {
+  x: AlmostForeignField | Field3 | bigint | number;
+  y: AlmostForeignField | Field3 | bigint | number;
+};
+
+function toPoint({ x, y }: ForeignTwisted): Point {
+  return { x: x.value, y: y.value };
+}
 
 /**
  * Non-zero twisted elliptic curve point.
@@ -52,6 +99,25 @@ const Point = {
   },
 
   provable: provable({ x: Field3, y: Field3 }),
+  /**
+   * On input a compressed representation of a Edwards25519 point as 32 bytes of
+   * hexadecimal string, return the point with bigint coordinates.
+   *
+   * @param hex 32 bytes of hexadecimal string
+   * @returns point with bigint coordinates {x, y}
+   */
+  fromHex(hex: string): point {
+    const y = BigInt(`0x${hex}`) & ((BigInt(1) << 255n) - 1n); // y (mask top bit)
+    const x_0 = (BigInt(`0x${hex}`) >> 255n) & 1n; // parity bit for x
+
+    if (y >= Curve.modulus) {
+      throw new Error(`Invalid y value: ${y} is larger tan the field size.`);
+    }
+
+    let x = recoverX(y, x_0);
+
+    return { x, y };
+  },
 };
 
 function add(
@@ -376,4 +442,704 @@ function simpleMapToCurve(x: bigint, Curve: AffineTwistedCurve) {
     p = Curve.scale(p, Curve.cofactor!);
   }
   return p;
+}
+
+namespace Eddsa {
+  /**
+   * EdDSA signature consisting of a compressed curve point R and the scalar s.
+   */
+  export type Signature = { R: Field3; s: Field3 };
+  export type signature = { R: bigint; s: bigint };
+}
+
+const EddsaSignature = {
+  from({ R, s }: Eddsa.signature): Eddsa.Signature {
+    return { R: Field3.from(R), s: Field3.from(s) };
+  },
+  toBigint({ R, s }: Eddsa.Signature): Eddsa.signature {
+    return { R: Field3.toBigint(R), s: Field3.toBigint(s) };
+  },
+  isConstant: (S: Eddsa.Signature) => Provable.isConstant(EddsaSignature, S),
+
+  /**
+   * Parse an EdDSA signature from a raw 130-character hex string (64 bytes + "0x").
+   */
+  fromHex(rawSignature: string): Eddsa.Signature {
+    // Validate input format
+    let prefix = rawSignature.slice(0, 2);
+    let signature = rawSignature.slice(2);
+    if (prefix !== '0x' || signature.length !== 128) {
+      throw new Error(
+        `Signature.fromHex(): Invalid signature, expected hex string 0x... of length 130.`
+      );
+    }
+
+    // Split the signature into R and s components
+    const Rhex = signature.slice(0, 64); // First 32 bytes (64 hex chars for R)
+    const Shex = signature.slice(64); // Last 32 bytes (64 hex chars for s)
+    const R = BigInt(`0x${Rhex}`); // R value as a bigint
+    const s = BigInt(`0x${Shex}`); // s value as a bigint
+
+    if (s < 0 || s >= Curve.order) {
+      throw new Error(`Invalid s value: must be a scalar modulo curve order.`);
+    }
+
+    Point.fromHex(Rhex); // Check that R represents a valid point
+
+    return Eddsa.Signature.from({ R, s });
+  },
+
+  provable: provable({ R: Field3, s: Field3 }),
+};
+
+// Parameters used in Ed25519 (EdDSA algorithm for edwards25519 curve)
+// https://datatracker.ietf.org/doc/html/rfc8032#section-5.1
+const edwards25519Params: TwistedCurveParams = {
+  name: 'edwards25519',
+  modulus: Bindings.exampleFields.f25519.modulus, // 2^255 - 19
+  order: 0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3edn, //2^252 + 27742317777372353535851937790883648493,
+  cofactor: 8n,
+  generator: {
+    x: 0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51an, // <=> 15112221349535400772501151409588531511454012693041857206046113283949847762202
+    y: 0x6666666666666666666666666666666666666666666666666666666666666658n, // <=> 4/5 mod p <=> 46316835694926478169428394003475163141307993866256225615783033603165251855960
+  },
+  a: 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffecn, // <=> -1 mod p <=> 57896044618658097711785492504343953926634992332820282019728792003956564819948
+  d: 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3n, // -121665/121666 mod p <=> 37095705934669439343138083508754565189542113879843219016388785533085940283555
+};
+
+const TwistedCurves = {
+  Edwards25519: edwards25519Params,
+};
+
+/** EdDSA over Edwards25519 */
+const Curve = createAffineTwistedCurve(edwards25519Params);
+const basePoint = Point.from(Curve.one);
+
+/**
+ * Encode a point of the Edwards25519 curve into its compressed representation.
+ *
+ * @param input Point with {@link Field3} coordinates {x, y}
+ * @returns 32-byte compressed representation of the point as {@link Field3}
+ */
+function encode(input: Point): Field3 {
+  let p = Curve.Field.modulus;
+  // https://www.rfc-editor.org/rfc/pdfrfc/rfc8032.txt.pdf Section 5.1.2
+  let witnesses = Provable.witnessFields(8, () => {
+    let x = Field3.toBigint(input.x);
+    let y = Field3.toBigint(input.y);
+    let x_lsb = x & 1n; // parity bit for x
+    let x_masked = (x >> 1n) * 2n; // x with parity bit removed
+    let y_msb = (y >> 255n) & 1n; // most significant bit of y
+    let y_masked = y & ((1n << 255n) - 1n); // mask most significant bit
+
+    return [
+      x_lsb,
+      ...ForeignField.Util.split(x_masked),
+      y_msb,
+      ...ForeignField.Util.split(y_masked),
+    ];
+  });
+
+  let [
+    x_lsb,
+    x_masked0,
+    x_masked1,
+    x_masked2,
+    y_msb,
+    y_masked0,
+    y_masked1,
+    y_masked2,
+  ] = witnesses;
+
+  x_lsb.assertBool('Parity bit of x coordinate is not a bit');
+  y_msb.assertBool('MSB of y coordinate is not a bit');
+
+  let x_masked: Field3 = [x_masked0, x_masked1, x_masked2];
+  let y_masked: Field3 = [y_masked0, y_masked1, y_masked2];
+
+  let x_lsb3: Field3 = [x_lsb, new Field(0n), new Field(0n)];
+  let y_msb3: Field3 = [y_msb, new Field(0n), new Field(0n)];
+
+  ForeignField.assertEquals(input.x, ForeignField.add(x_lsb3, x_masked, p));
+  ForeignField.assertEquals(
+    input.y,
+    ForeignField.add(
+      ForeignField.mul(y_msb3, Field3.from(1n << 255n), p),
+      y_masked,
+      p
+    )
+  );
+
+  let enc = ForeignField.add(
+    ForeignField.mul(x_lsb3, Field3.from(1n << 255n), p),
+    y_masked,
+    p
+  );
+  return enc;
+}
+
+/**
+ * Decode a little-endian 32-byte compressed representation of Edwards25519 as
+ * the point.
+ *
+ * @param compressed: 32-byte compressed representation of the point as {@link Field3}
+ * @returns Point with {@link Field3} coordinates {x, y}
+ */
+function decode(input: UInt8[]): Point {
+  if (input.length !== 32) {
+    throw new Error(
+      `Invalid compressed point: expected 32 bytes, got ${input.length}.`
+    );
+  }
+
+  let p = Curve.modulus;
+
+  // https://www.rfc-editor.org/rfc/pdfrfc/rfc8032.txt.pdf Section 5.1.3
+  let witnesses = Provable.witnessFields(11, () => {
+    let bytes = input.map((byte) => byte.toBigInt());
+    // most significant byte of input is the parity bit for x
+    const x_par = bytes[31] >> 7n;
+    bytes[31] &= 0b01111111n;
+    const y_msb = bytes[31];
+
+    const y = bytes.reduce((acc, byte, i) => acc + (byte << BigInt(i * 8)), 0n);
+    assert(y < p, 'Decoding failed: y coordinate larger than the field size');
+    const x = recoverX(y, x_par);
+
+    // to check parity bit of x
+    const aux = (x - x_par) / 2n;
+
+    return [
+      ...ForeignField.Util.split(aux),
+      x_par,
+      ...ForeignField.Util.split(x),
+      y_msb,
+      ...ForeignField.Util.split(y),
+    ];
+  });
+
+  let [aux0, aux1, aux2, x_par, x0, x1, x2, y_msb, y0, y1, y2] = witnesses;
+  let x_0limbs: Field3 = [x_par, Field.from(0n), Field.from(0n)];
+  let aux: Field3 = [aux0, aux1, aux2];
+  let x: Field3 = [x0, x1, x2];
+  let y: Field3 = [y0, y1, y2];
+
+  ForeignField.assertLessThan(y, p);
+  // check x_0 is a bit
+  x_par.assertBool('Parity bit of x coordinate is not a bit');
+
+  // check y_msb shape
+  input[31].value.assertEquals(y_msb.add(x_par.mul(128n)));
+
+  // check y decomposition
+  let input_ = input.slice();
+  input_[31] = UInt8.from(y_msb);
+  ForeignField.assertEquals(y, Octets.toField3(input_, p));
+
+  // check (x, y) is on the curve
+  TwistedCurve.assertOnCurve({ x, y }, Curve);
+
+  // check parity/sign of x
+  ForeignField.assertEquals(
+    ForeignField.add(aux, aux, p),
+    ForeignField.sub(x, x_0limbs, p)
+  );
+
+  // if x is zero, x_0 must be 0
+  Provable.if(
+    ForeignField.equals(x, 0n, p),
+    Bool,
+    x_par.equals(1n).not(),
+    new Bool(true)
+  );
+  // check sign of x
+  // if x_0 is 1, x must be odd (negative)
+  Provable.if(x_par.equals(1n), Bool, x[0].equals(1n), new Bool(true));
+
+  return { x, y };
+}
+
+/**
+ * Generate a new EdDSA public key from a private key that is a random 32-byte
+ * random seed.
+ *
+ * https://www.rfc-editor.org/rfc/pdfrfc/rfc8032.txt.pdf Section 5.1.5
+ *
+ * @param privateKey: 32-byte random seed
+ * @returns the public key as a 32-byte encoded curve point,
+ *          and the full SHA2-512 digest of the private key
+ */
+function keygenEddsa(privateKey: UInt8[]): [Field3, Bytes] {
+  // TODO: use arrays instead of bigints?
+  if (privateKey.length > 32) {
+    throw new Error(`Invalid length of EdDSA private key: ${privateKey}.`);
+  }
+  // hash private key with SHA2-512
+  const h = SHA2.hash(512, privateKey);
+  // only need lowest 32 bytes to generate the public key
+  let buffer = h.bytes.slice(0, 32);
+  // prune buffer
+  buffer[0] = UInt8.from(
+    Gadgets.and(buffer[0].value, Field.from(0b11111000), 8)
+  ); // clear lowest 3 bits
+  buffer[31] = UInt8.from(
+    Gadgets.and(buffer[31].value, Field.from(0b01111111), 8)
+  ); // clear highest bit
+  buffer[31] = UInt8.from(
+    Gadgets.or(buffer[31].value, Field.from(0b01000000), 8)
+  ); // set second highest bit
+
+  // NOTE: despite clearing the top bit,
+  //       the scalar could be larger than a native field element
+
+  // read scalar from buffer (initially laid out as little endian)
+  const f = Curve.Field.modulus;
+  const s = Octets.toField3(buffer, f);
+
+  return [encode(TwistedCurve.scale(s, basePoint, Curve)), h];
+}
+
+/**
+ * Sign a message using Ed25519 (EdDSA over Edwards25519 curve).
+ *
+ * https://www.rfc-editor.org/rfc/pdfrfc/rfc8032.txt.pdf Section 5.1.6
+ *
+ * @param privateKey: 32-byte random seed
+ * @param message: arbitrary length message to be signed
+ * @returns the 64-bit signature composed by 32-bytes corresponding to a
+ *          compressed curve point and a 32-byte scalar
+ */
+function signEddsa(
+  privateKey: bigint,
+  message: (bigint | number)[] | Uint8Array
+): Eddsa.Signature {
+  const L = Curve.order;
+  let key = Octets.fromBigint(privateKey);
+  const [publicKey, h] = keygenEddsa(key);
+  // secret scalar obtained from first half of the digest
+  const scalar = h.bytes.slice(0, 32);
+  // prefix obtained from second half of the digest
+  const prefix = h.bytes.slice(32, 64);
+
+  // Hash the prefix concatenated with the message to obtain 64 bytes, that
+  // need to be interpreted as little endian and reduced modulo the curve order
+  const r = Octets.toField3(SHA2.hash(512, [...prefix, ...message]).bytes, L);
+
+  // R is the encoding of the point resulting from [r]B
+  let R = encode(TwistedCurve.scale(r, basePoint, Curve));
+
+  // Hash the encoding concatenated with the public key and the message to
+  // obtain a 64-byte digest that needs to be interpreted as little endian
+  // and reduced modulo the curve order
+  const k = Octets.toField3(
+    SHA2.hash(512, [
+      ...Octets.fromField3(R).flat(),
+      ...Octets.fromField3(publicKey).flat(),
+      ...message,
+    ]).bytes,
+    L
+  );
+
+  let s = ForeignField.add(
+    r,
+    ForeignField.mul(k, Octets.toField3(scalar, L), L),
+    L
+  );
+
+  return { R, s };
+}
+
+function verifyEddsa(
+  signature: Eddsa.Signature,
+  message: UInt8[],
+  publicKey: Field3
+): Bool {
+  let { R, s } = signature;
+
+  let { x, y } = decode(Octets.fromField3(R));
+  let A = decode(Octets.fromField3(publicKey));
+
+  ForeignField.assertLessThanOrEqual(s, Curve.order);
+
+  let k = SHA2.hash(512, [
+    ...Octets.fromField3(R).flat(),
+    ...Octets.fromField3(publicKey).flat(),
+    ...message.flat(),
+  ]).bytes;
+
+  // Check [s]B = R + [k]A
+  return Provable.equal(
+    Point,
+    TwistedCurve.scale(s, basePoint, Curve),
+    TwistedCurve.add(
+      { x, y },
+      TwistedCurve.scale(Octets.toField3(k, Curve.Field.modulus), A, Curve),
+      Curve
+    )
+  );
+}
+
+const Eddsa = {
+  sign: signEddsa,
+  verify: verifyEddsa,
+  Signature: EddsaSignature,
+};
+
+// https://www.rfc-editor.org/rfc/pdfrfc/rfc8032.txt.pdf Section 5.1.3
+function recoverX(y: bigint, x_0: bigint): bigint {
+  const p = Curve.modulus;
+  const u = y * y - 1n;
+  const v = Curve.d * y * y - Curve.a;
+  const candidate_x = (u * v) ^ (3n * ((u * v) ^ 7n)) ^ ((p - 5n) / 8n);
+
+  let aux = mod((v * candidate_x) ^ 2n, p);
+
+  let x =
+    aux === u
+      ? candidate_x
+      : aux === -u
+      ? (candidate_x * 2n) ^ ((p - 1n) / 4n)
+      : (() => {
+          throw new Error(
+            `Decoding failed: no square root x exists for y value: ${y}.`
+          );
+        })();
+
+  // Use the parity bit to select the correct sign for x
+  if (x === 0n && x_0 === 1n) {
+    throw new Error(`Invalid x value: x is zero but parity bit is 1.`);
+  } else if (x % 2n !== x_0) {
+    x = p - x;
+  }
+
+  return x;
+}
+
+class ForeignTwisted {
+  x: AlmostForeignField;
+  y: AlmostForeignField;
+
+  /**
+   * Create a new {@link ForeignTwisted} from an object representing the (affine
+   * twisted) x and y coordinates.
+   *
+   * Note: Inputs must be range checked if they originate from a different field
+   * with a different modulus or if they are not constants. Please refer to the
+   * {@link ForeignField} constructor comments for more details.
+   *
+   * @example
+   * ```ts
+   * let x = new ForeignTwisted({ x: 0n, y: 1n });
+   * ```
+   *
+   * **Warning**: This fails for a constant input which does not represent an
+   *              actual point on the curve or not in the subgroup.
+   *
+   * **Note**: For now, only the edwards25519 curve is supported.
+   */
+  constructor(g: {
+    x: AlmostForeignField | Field3 | bigint | number;
+    y: AlmostForeignField | Field3 | bigint | number;
+  }) {
+    this.x = new this.Constructor.Field(g.x);
+    this.y = new this.Constructor.Field(g.y);
+    // don't allow constants that aren't on the curve or in the prime subgroup
+    if (this.isConstant()) {
+      this.assertOnCurve();
+      this.assertInSubgroup();
+    }
+  }
+
+  /**
+   * Coerce the input to a {@link ForeignTwisted}.
+   */
+  static from(g: ForeignTwisted | FlexiblePoint) {
+    if (g instanceof this) return g;
+    return new this(g);
+  }
+
+  /**
+   * Parses a hexadecimal string representing an uncompressed elliptic curve point
+   * and coerces it into a {@link ForeignTwisted} point using big-endian byte order.
+   *
+   * The method extracts the x and y coordinates from the provided hex string and
+   * verifies that the resulting point lies on the curve.
+   *
+   * **Note:** This method only supports uncompressed elliptic curve points, which
+   * are 65 bytes in total (1-byte prefix + 32 bytes for x + 32 bytes for y).
+   *
+   * @param hex - The hexadecimal string representing the uncompressed elliptic curve point.
+   * @returns - A point on the foreign curve, parsed from the given hexadecimal string.
+   *
+   * @throws - Throws an error if the input is not a valid public key.
+   *
+   * @example
+   * ```ts
+   * class Edwards25519 extends createForeignCurveTwisted(Crypto.TwistedCurveParams.Edwards25519) {}
+   *
+   * // Example hex string for uncompressed point
+   * const publicKeyHex = '04f8b8db25c619d0c66b2dc9e97ecbafafae...';
+   * const point = Edwards25519.fromHex(publicKeyHex);
+   * ```
+   *
+   * **Important:** This method is only designed to handle uncompressed elliptic curve points in hex format.
+   */
+  static fromHex(hex: string) {
+    // trim the '0x' prefix if present
+    if (hex.startsWith('0x')) {
+      hex = hex.slice(2);
+    }
+
+    const bytes = Bytes.fromHex(hex).toBytes();
+    const sizeInBytes = Math.ceil(this.Bigint.Field.sizeInBits / 8);
+
+    // extract x and y coordinates from the byte array
+    const xBytes = bytes.subarray(0, sizeInBytes); // first `sizeInBytes` bytes for x-coordinate
+    const yBytes = bytes.subarray(sizeInBytes, 2 * sizeInBytes); // next `sizeInBytes` bytes for y-coordinate
+
+    // convert byte arrays to bigint
+    const x = BigInt('0x' + Bytes.from(xBytes).toHex());
+    const y = BigInt('0x' + Bytes.from(yBytes).toHex());
+
+    // construct the point on the curve using the x and y coordinates
+    let P = this.from({ x, y });
+
+    // ensure that the point is on the curve
+    P.assertOnCurve();
+
+    return P;
+  }
+
+  /**
+   * The constant generator point.
+   */
+  static get generator() {
+    return new this(this.Bigint.one);
+  }
+  /**
+   * The size of the curve's base field.
+   */
+  static get modulus() {
+    return this.Bigint.modulus;
+  }
+  /**
+   * The size of the curve's base field.
+   */
+  get modulus() {
+    return this.Constructor.Bigint.modulus;
+  }
+
+  /**
+   * Checks whether this curve point is constant.
+   *
+   * See {@link FieldVar} to understand constants vs variables.
+   */
+  isConstant() {
+    return Provable.isConstant(this.Constructor, this);
+  }
+
+  /**
+   * Convert this curve point to a point with bigint coordinates.
+   */
+  toBigint() {
+    return this.Constructor.Bigint.from({
+      x: this.x.toBigInt(),
+      y: this.y.toBigInt(),
+    });
+  }
+
+  /**
+   * Twisted elliptic curve addition (complete)
+   *
+   * ```ts
+   * let r = p.add(q); // r = p + q
+   * ```
+   */
+  add(h: ForeignTwisted | FlexiblePoint) {
+    let Curve = this.Constructor.Bigint;
+    let h_ = this.Constructor.from(h);
+    let p = TwistedCurve.add(toPoint(this), toPoint(h_), Curve);
+    return new this.Constructor(p);
+  }
+
+  /**
+   * Twisted elliptic curve doubling.
+   *
+   * @example
+   * ```ts
+   * let r = p.double(); // r = 2 * p
+   * ```
+   */
+  double() {
+    let Curve = this.Constructor.Bigint;
+    let p = TwistedCurve.double(toPoint(this), Curve);
+    return new this.Constructor(p);
+  }
+
+  /**
+   * Twisted elliptic curve negation.
+   *
+   * @example
+   * ```ts
+   * let r = p.negate(); // r = -p
+   * ```
+   */
+  negate(): ForeignTwisted {
+    return new this.Constructor({ x: this.x.neg(), y: this.y });
+  }
+
+  /**
+   * Twisted elliptic curve scalar multiplication, where the scalar is represented as a {@link ForeignField} element.
+   *
+   * @example
+   * ```ts
+   * let r = p.scale(s); // r = s * p
+   * ```
+   */
+  scale(scalar: AlmostForeignField | bigint | number) {
+    let Curve = this.Constructor.Bigint;
+    let scalar_ = this.Constructor.Scalar.from(scalar);
+    let p = TwistedCurve.scale(scalar_.value, toPoint(this), Curve);
+    return new this.Constructor(p);
+  }
+
+  static assertOnCurve(g: ForeignTwisted) {
+    TwistedCurve.assertOnCurve(toPoint(g), this.Bigint);
+  }
+
+  /**
+   * Assert that this point lies on the elliptic curve, which means it satisfies the equation
+   * `a * x^2 + y^2 = 1 + d * x^2 * y^2`
+   */
+  assertOnCurve() {
+    this.Constructor.assertOnCurve(this);
+  }
+
+  static assertInSubgroup(g: ForeignTwisted) {
+    if (this.Bigint.hasCofactor) {
+      TwistedCurve.assertInSubgroup(toPoint(g), this.Bigint);
+    }
+  }
+
+  /**
+   * Assert that this point lies in the prime subgroup, which means that scaling
+   * the point by the curve order results in a nonzero point.
+   */
+  assertInSubgroup() {
+    this.Constructor.assertInSubgroup(this);
+  }
+
+  /**
+   * Check that this is a valid element of the target subgroup of the curve:
+   * - Check that the coordinates are valid field elements
+   * - Use {@link assertOnCurve()} to check that the point lies on the curve
+   * - If the curve has cofactor unequal to 1, use {@link assertInSubgroup()}.
+   */
+  static check(g: ForeignTwistedNotNeeded) {
+    multiRangeCheck(g.x.value);
+    multiRangeCheck(g.y.value);
+    this.assertOnCurve(g);
+    this.assertInSubgroup(g);
+  }
+
+  // dynamic subclassing infra
+  get Constructor() {
+    return this.constructor as typeof ForeignTwisted;
+  }
+  static _Bigint?: AffineTwistedCurve;
+  static _Field?: typeof AlmostForeignField;
+  static _Scalar?: typeof AlmostForeignField;
+  static _provable?: ProvablePureExtended<
+    ForeignTwisted,
+    { x: bigint; y: bigint },
+    { x: string; y: string }
+  >;
+
+  /**
+   * Curve arithmetic on JS bigints.
+   */
+  static get Bigint() {
+    assert(this._Bigint !== undefined, 'ForeignTwisted not initialized');
+    return this._Bigint;
+  }
+  /**
+   * The base field of this curve as a {@link ForeignField}.
+   */
+  static get Field() {
+    assert(this._Field !== undefined, 'ForeignTwisted not initialized');
+    return this._Field;
+  }
+  /**
+   * The scalar field of this curve as a {@link ForeignField}.
+   */
+  static get Scalar() {
+    assert(this._Scalar !== undefined, 'ForeignTwisted not initialized');
+    return this._Scalar;
+  }
+  /**
+   * `Provable<ForeignCurve>`
+   */
+  static get provable() {
+    assert(this._provable !== undefined, 'ForeignTwisted not initialized');
+    return this._provable;
+  }
+}
+
+class ForeignTwistedNotNeeded extends ForeignTwisted {
+  constructor(g: {
+    x: AlmostForeignField | Field3 | bigint | number;
+    y: AlmostForeignField | Field3 | bigint | number;
+  }) {
+    super(g);
+  }
+
+  static check(g: ForeignTwistedNotNeeded) {
+    multiRangeCheck(g.x.value);
+    multiRangeCheck(g.y.value);
+    this.assertOnCurve(g);
+    this.assertInSubgroup(g);
+  }
+}
+
+/**
+ * Create a class representing a twisted elliptic curve group, which is different
+ * from the native {@link Group}.
+ *
+ * ```ts
+ * const Curve = createForeignTwisted(Crypto.TwistedCurveParams.Edwards25519);
+ * ```
+ *
+ * `createForeignTwisted(params)` takes curve parameters {@link TwistedCurveParams} as input.
+ * We support `modulus` and `order` to be prime numbers up to 259 bits.
+ *
+ * The returned {@link ForeignTwistedNotNeeded} class represents a curve point
+ * (including zero) and supports standard elliptic curve operations like point
+ * addition and scalar multiplication.
+ *
+ * {@link ForeignTwistedNotNeeded} also includes to associated foreign fields:
+ * `ForeignCurve.Field` and `ForeignCurve.Scalar`, see {@link createForeignField}.
+ */
+function createForeignTwisted(
+  params: TwistedCurveParams
+): typeof ForeignTwisted {
+  assert(
+    params.modulus > l2Mask + 1n,
+    'Base field moduli smaller than 2^176 are not supported'
+  );
+
+  const FieldUnreduced = createForeignField(params.modulus);
+  const ScalarUnreduced = createForeignField(params.order);
+  class Field extends FieldUnreduced.AlmostReduced {}
+  class Scalar extends ScalarUnreduced.AlmostReduced {}
+
+  const BigintCurve = createAffineTwistedCurve(params);
+
+  class Curve extends ForeignTwisted {
+    static _Bigint = BigintCurve;
+    static _Field = Field;
+    static _Scalar = Scalar;
+    static _provable = provableFromClass(Curve, { x: Field, y: Field });
+  }
+
+  return Curve;
 }
