@@ -1,5 +1,7 @@
 # o1js-eddsa
 
+> ⚠️ **NOTE**: The current implementation produces circuits that are too large to fit within existing constraint limits. PRs that optimize this library are welcome!
+
 ![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 [![npm version](https://img.shields.io/npm/v/o1js-eddsa.svg)](https://www.npmjs.com/package/o1js-eddsa)
 
