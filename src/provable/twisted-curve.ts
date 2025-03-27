@@ -3,9 +3,8 @@ import {
   assert,
   Gadgets,
   provable,
-  Bindings,
+  Core,
   Field,
-  Octets,
   UInt8,
   Bool,
   AlmostForeignField,
@@ -23,7 +22,7 @@ import {
   affineTwistedZero,
   createAffineTwistedCurve,
 } from '../crypto/elliptic-curve.js';
-import { TwistedCurveParams, TwistedCurves } from '../index.js';
+import { TwistedCurveParams } from '../index.js';
 
 export {
   TwistedCurve,
@@ -40,18 +39,11 @@ export {
   TwistedCurves,
 };
 
-const { assertPositiveInteger } = Bindings.NonNegativeInteger;
+const { Field3, arrayGetGeneric, ForeignField, SHA2, multiRangeCheck } =
+  Gadgets;
 
-const {
-  sliceField3,
-  Field3,
-  arrayGetGeneric,
-  ForeignField,
-  SHA2,
-  multiRangeCheck,
-} = Gadgets;
 const { l2Mask } = Gadgets.Constants;
-const { mod } = Bindings.FiniteField;
+const { mod } = Core.FiniteField;
 
 const TwistedCurve = {
   add,
@@ -338,7 +330,7 @@ function multiScalarMul(
 
   // slice scalars
   let scalarChunks = scalars.map((s, i) =>
-    sliceField3(s, { maxBits, chunkSize: windowSizes[i] })
+    ForeignField.sliceField3(s, { maxBits, chunkSize: windowSizes[i] })
   );
 
   // soundness follows because add() and double() are sound, on all inputs that
@@ -496,7 +488,7 @@ const EddsaSignature = {
 // https://datatracker.ietf.org/doc/html/rfc8032#section-5.1
 const edwards25519Params: TwistedCurveParams = {
   name: 'edwards25519',
-  modulus: Bindings.exampleFields.f25519.modulus, // 2^255 - 19
+  modulus: Core.exampleFields.f25519.modulus, // 2^255 - 19
   order: 0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3edn, //2^252 + 27742317777372353535851937790883648493,
   cofactor: 8n,
   generator: {
@@ -532,12 +524,7 @@ function encode(input: Point): Field3 {
     let y_msb = (y >> 255n) & 1n; // most significant bit of y
     let y_masked = y & ((1n << 255n) - 1n); // mask most significant bit
 
-    return [
-      x_lsb,
-      ...ForeignField.Util.split(x_masked),
-      y_msb,
-      ...ForeignField.Util.split(y_masked),
-    ];
+    return [x_lsb, ...Field3.split(x_masked), y_msb, ...Field3.split(y_masked)];
   });
 
   let [
@@ -610,11 +597,11 @@ function decode(input: UInt8[]): Point {
     const aux = (x - x_par) / 2n;
 
     return [
-      ...ForeignField.Util.split(aux),
+      ...Field3.split(aux),
       x_par,
-      ...ForeignField.Util.split(x),
+      ...Field3.split(x),
       y_msb,
-      ...ForeignField.Util.split(y),
+      ...Field3.split(y),
     ];
   });
 
@@ -634,7 +621,7 @@ function decode(input: UInt8[]): Point {
   // check y decomposition
   let input_ = input.slice();
   input_[31] = UInt8.from(y_msb);
-  ForeignField.assertEquals(y, Octets.toField3(input_, p));
+  ForeignField.assertEquals(y, toField3(input_, p));
 
   // check (x, y) is on the curve
   TwistedCurve.assertOnCurve({ x, y }, Curve);
@@ -694,7 +681,7 @@ function keygenEddsa(privateKey: UInt8[]): [Field3, Bytes] {
 
   // read scalar from buffer (initially laid out as little endian)
   const f = Curve.Field.modulus;
-  const s = Octets.toField3(buffer, f);
+  const s = toField3(buffer, f);
 
   return [encode(TwistedCurve.scale(s, basePoint, Curve)), h];
 }
@@ -714,7 +701,7 @@ function signEddsa(
   message: (bigint | number)[] | Uint8Array
 ): Eddsa.Signature {
   const L = Curve.order;
-  let key = Octets.fromBigint(privateKey);
+  let key = fromBigint(privateKey);
   const [publicKey, h] = keygenEddsa(key);
   // secret scalar obtained from first half of the digest
   const scalar = h.bytes.slice(0, 32);
@@ -723,7 +710,7 @@ function signEddsa(
 
   // Hash the prefix concatenated with the message to obtain 64 bytes, that
   // need to be interpreted as little endian and reduced modulo the curve order
-  const r = Octets.toField3(SHA2.hash(512, [...prefix, ...message]).bytes, L);
+  const r = toField3(SHA2.hash(512, [...prefix, ...message]).bytes, L);
 
   // R is the encoding of the point resulting from [r]B
   let R = encode(TwistedCurve.scale(r, basePoint, Curve));
@@ -731,20 +718,16 @@ function signEddsa(
   // Hash the encoding concatenated with the public key and the message to
   // obtain a 64-byte digest that needs to be interpreted as little endian
   // and reduced modulo the curve order
-  const k = Octets.toField3(
+  const k = toField3(
     SHA2.hash(512, [
-      ...Octets.fromField3(R).flat(),
-      ...Octets.fromField3(publicKey).flat(),
+      ...fromField3(R).flat(),
+      ...fromField3(publicKey).flat(),
       ...message,
     ]).bytes,
     L
   );
 
-  let s = ForeignField.add(
-    r,
-    ForeignField.mul(k, Octets.toField3(scalar, L), L),
-    L
-  );
+  let s = ForeignField.add(r, ForeignField.mul(k, toField3(scalar, L), L), L);
 
   return { R, s };
 }
@@ -756,14 +739,14 @@ function verifyEddsa(
 ): Bool {
   let { R, s } = signature;
 
-  let { x, y } = decode(Octets.fromField3(R));
-  let A = decode(Octets.fromField3(publicKey));
+  let { x, y } = decode(fromField3(R));
+  let A = decode(fromField3(publicKey));
 
   ForeignField.assertLessThanOrEqual(s, Curve.order);
 
   let k = SHA2.hash(512, [
-    ...Octets.fromField3(R).flat(),
-    ...Octets.fromField3(publicKey).flat(),
+    ...fromField3(R).flat(),
+    ...fromField3(publicKey).flat(),
     ...message.flat(),
   ]).bytes;
 
@@ -773,7 +756,7 @@ function verifyEddsa(
     TwistedCurve.scale(s, basePoint, Curve),
     TwistedCurve.add(
       { x, y },
-      TwistedCurve.scale(Octets.toField3(k, Curve.Field.modulus), A, Curve),
+      TwistedCurve.scale(toField3(k, Curve.Field.modulus), A, Curve),
       Curve
     )
   );
@@ -1142,4 +1125,101 @@ function createForeignTwisted(
   }
 
   return Curve;
+}
+
+function toField3(bytes: UInt8[], mod: bigint): Field3 {
+  // TODO: more efficient implementation
+  assert(mod < 1n << 259n, 'Foreign modulus must fit in 259 bits');
+  return bytes
+    .slice() // copy the array to prevent mutation
+    .reverse()
+    .map((b) => [Field.from(b.value), Field.from(0n), Field.from(0n)] as Field3)
+    .reduce((acc, byte) =>
+      ForeignField.add(
+        ForeignField.mul(Field3.from(acc), Field3.from(256n), mod),
+        Field3.from(byte),
+        mod
+      )
+    );
+}
+
+function fromBigint(x: bigint, bytelength: number = 32): UInt8[] {
+  assert(x < 1n << BigInt(bytelength * 8), 'Input does not fit in bytelength');
+  let bytes = Array.from(
+    { length: bytelength },
+    (_, k) => new UInt8((x >> BigInt(8 * k)) & 0xffn)
+  );
+  return bytes;
+}
+
+function fromField3(x: Field3): UInt8[] {
+  const limbBytes = Number(Gadgets.Constants.l) / 8;
+  return [
+    fromField(x[0], limbBytes),
+    fromField(x[1], limbBytes),
+    fromField(x[2], limbBytes - 1), // only 256 bits
+  ].flat();
+}
+/**
+ * Returns an array of {@link UInt8} elements representing this field element
+ * as little endian ordered bytes.
+ *
+ * If the optional `bytelength` argument is used, it proves that the field
+ * element fits in `bytelength` bytes. The length has to be between 0 and 32,
+ * and the method throws if it isn't.
+ *
+ * **Warning**: The cost of this operation in a zk proof depends on the
+ * `bytelength` you specify, which by default is 32 bytes. Prefer to pass a
+ * smaller `bytelength` if possible.
+ *
+ * @param input - the field element to convert to bytes.
+ * @param bytelength - the number of bytes to fit the element. If the element
+ *                     does not fit in `length` bits, the functions throws an
+ *                     error.
+ *
+ * @return An array of {@link UInt8} element representing this {@link Field} in
+ *         little endian encoding.
+ */
+function fromField(input: Field, bytelength: number = 32): UInt8[] {
+  checkBitLength('Field.toBytes()', bytelength, 32 * 8);
+  if (input.isConstant()) {
+    if (input.toBigInt() >= 1n << (BigInt(bytelength) * 8n)) {
+      throw Error(`toOctets(): ${input} does not fit in ${bytelength} bytes`);
+    }
+    let x = input.toBigInt();
+    return Array.from(
+      { length: bytelength },
+      (_, k) => new UInt8((x >> BigInt(8 * k)) & 0xffn)
+    );
+  }
+  let bytes = Provable.witness(Provable.Array(UInt8, bytelength), () => {
+    let x = input.toBigInt();
+    return Array.from(
+      { length: bytelength },
+      (_, k) => new UInt8((x >> BigInt(8 * k)) & 0xffn)
+    );
+  });
+  let field = bytes
+    .reverse()
+    .map((x) => x.value)
+    .reduce((acc, byte) => acc.mul(256).add(byte));
+
+  field.assertEquals(
+    input,
+    `toOctets(): incorrect decomposition into ${bytelength} bytes`
+  );
+  return bytes;
+}
+
+function checkBitLength(name: string, length: number, maxLength: number) {
+  if (length > maxLength)
+    throw Error(
+      `${name}: bit length must be ${maxLength} or less, got ${length}`
+    );
+  if (length < 0)
+    throw Error(`${name}: bit length must be non-negative, got ${length}`);
+}
+
+function assertPositiveInteger(n: number, message: string) {
+  if (!Number.isInteger(n) || n <= 0) throw Error(message);
 }
