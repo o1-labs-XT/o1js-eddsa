@@ -1,4 +1,4 @@
-import { assert, Bindings } from 'o1js';
+import { assert, Core } from 'o1js';
 
 export {
   AffineTwistedCurve,
@@ -10,9 +10,9 @@ export {
   TwistedCurveParams,
 };
 
-const { mod, inverse, createField, p } = Bindings.FiniteField;
-const { bigIntToBits } = Bindings.BigIntHelpers;
-type GroupProjective = Bindings.EllipticCurve.GroupProjective;
+const { mod, inverse, createField, p } = Core.FiniteField;
+const { bigIntToBits } = Core.BigIntHelpers;
+type GroupProjective = Core.EllipticCurve.GroupProjective;
 
 type GroupAffineTwisted = { x: bigint; y: bigint };
 
