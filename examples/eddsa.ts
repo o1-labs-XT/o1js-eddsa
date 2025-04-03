@@ -1,5 +1,5 @@
 import { ZkProgram, Bool, Bytes } from 'o1js';
-import { createEddsa, createForeignTwisted, TwistedCurves } from 'o1js-eddsa';
+import { createEddsa, createForeignTwisted, TwistedCurves } from 'eddsa-o1js';
 
 export { eddsa, Edwards25519, Eddsa, Bytes32 };
 

@@ -1,9 +1,9 @@
-# o1js-eddsa
+# eddsa-o1js
 
 > ⚠️ **NOTE**: The current implementation produces circuits that are too large to fit within existing constraint limits. PRs that optimize this library are welcome!
 
 ![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
-[![npm version](https://img.shields.io/npm/v/o1js-eddsa.svg)](https://www.npmjs.com/package/o1js-eddsa)
+[![npm version](https://img.shields.io/npm/v/eddsa-o1js.svg)](https://www.npmjs.com/package/eddsa-o1js)
 
 A provable EdDSA signature verification library for [o1js](https://github.com/o1-labs/o1js), enabling zkApp developers to verify EdDSA signatures inside zk-SNARKs.
 
@@ -17,16 +17,16 @@ A provable EdDSA signature verification library for [o1js](https://github.com/o1
 ## Installation
 
 ```bash
-npm install o1js-eddsa
+npm install eddsa-o1js
 ```
 
 ## Usage
 
-Here's a quick example of how to use o1js-eddsa to verify an EdDSA signature:
+Here's a quick example of how to use eddsa-o1js to verify an EdDSA signature:
 
 ```typescript
 import { ZkProgram, Bool, Bytes } from 'o1js';
-import { createEddsa, createForeignTwisted, TwistedCurves } from 'o1js-eddsa';
+import { createEddsa, createForeignTwisted, TwistedCurves } from 'eddsa-o1js';
 
 // Create a custom Edwards25519 curve class
 class Edwards25519 extends createForeignTwisted(TwistedCurves.Edwards25519) {}
